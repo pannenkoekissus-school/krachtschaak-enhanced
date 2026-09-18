@@ -191,7 +191,7 @@ export function useAutoUpdate(): AutoUpdateState {
       // Native: download APK natively using CapacitorHttp / Filesystem to bypass WebView CORS and memory limits
       try {
         setIsDownloading(true);
-        setDownloadProgress(10);
+        setDownloadProgress(0);
         setError(null);
 
         const { Filesystem, Directory } = await import('@capacitor/filesystem').catch(() => ({} as any));
