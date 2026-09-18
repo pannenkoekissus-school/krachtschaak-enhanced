@@ -7,7 +7,6 @@ import OnlineLobby from './components/OnlineLobby';
 import GameReview from './components/GameReview';
 import Auth from './components/Auth';
 import PowerLegend from './components/PowerLegend';
-import HowToPlayModal from './components/HowToPlayModal';
 import BoardEditor from './components/BoardEditor';
 import Analysis from './components/Analysis';
 import AnalysisManager from './components/AnalysisManager';
@@ -87,7 +86,6 @@ const App: React.FC = () => {
     const [lastEditedBoard, setLastEditedBoard] = useState<BoardState | null>(null);
     const [lastEditedTurn, setLastEditedTurn] = useState<Color>(Color.White);
     const [showSettings, setShowSettings] = useState(false);
-    const [showHowToPlay, setShowHowToPlay] = useState(false);
     const [gameKFen, setGameKFen] = useState<string | null>(null);
 
     // Online state
@@ -4465,10 +4463,10 @@ const App: React.FC = () => {
 
                     <div className="mt-8 flex flex-col items-center gap-3 text-center">
                         <button
-                            onClick={() => setShowHowToPlay(true)}
+                            onClick={ShowHowToPlay}
                             className="text-blue-400 hover:text-blue-300 underline text-lg font-medium transition-colors"
                         >
-                            How to Play
+                            How to Play (Official Rules on Official Website in Dutch)
                         </button>
 
                         <div className="flex flex-wrap items-center justify-center gap-3 mt-2">
@@ -4676,7 +4674,6 @@ const App: React.FC = () => {
             {showAuthModal && gameMode === 'menu' && <div className="fixed inset-0 bg-black bg-opacity-50 z-40"></div>}
             {renderContent()}
             {showPowerLegend && <PowerLegend onClose={() => setShowPowerLegend(false)} />}
-            {showHowToPlay && <HowToPlayModal onClose={() => setShowHowToPlay(false)} />}
             {showAuthModal && gameMode === 'menu' && <Auth onClose={() => setShowAuthModal(false)} onAuthSuccess={onAuthSuccessCallback} />}
             {showConfirmation && (
                 <ConfirmationModal
