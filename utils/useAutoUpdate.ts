@@ -127,26 +127,30 @@ export function useAutoUpdate(): AutoUpdateState {
 
         // Compare release time with current app build timestamp
         const releaseTimestamp = new Date(releaseData.published_at).getTime();
-        const apkAssetTimestamp = apkAsset?.updated_at ? new Date(apkAsset.updated_at).getTime() : releaseTimestamp;
         const appBuildTimestamp = parseBuildTimestamp(currentBuildTime);
 
-        // If manual check, ignore dismissed storage
-        const dismissedTag = sessionStorage.getItem(DISMISSED_UPDATE_KEY);
+        // Dismissals must survive app restarts, so persist them (sessionStorage is
+        // wiped on a cold start, which made the prompt reappear every launch).
+        let dismissedTag: string | null = null;
+        try {
+          dismissedTag = localStorage.getItem(DISMISSED_UPDATE_KEY);
+        } catch {
+          dismissedTag = null;
+        }
         const isDismissed = !manual && dismissedTag === releaseData.tag_name;
 
         let hasNewerVersion = false;
 
-        if (appBuildTimestamp > 0 && (releaseTimestamp > 0 || apkAssetTimestamp > 0)) {
-          const checkTime = apkAssetTimestamp > 0 ? apkAssetTimestamp : releaseTimestamp;
+        if (currentTag && releaseData.tag_name) {
+          // Primary check: compare tags. Timestamps are unreliable here because the
+          // APK asset is uploaded after the app is built, making even the same
+          // version look newer. A matching tag always means no update.
+          hasNewerVersion = currentTag !== releaseData.tag_name;
+        } else if (appBuildTimestamp > 0 && releaseTimestamp > 0) {
+          // Fallback when no build tag is available: compare publish time.
           const MIN_TIME_DIFF_MS = 3 * 60 * 1000;
-          if (checkTime > appBuildTimestamp + MIN_TIME_DIFF_MS) {
-            hasNewerVersion = true;
-          } else if (currentTag && releaseData.tag_name && currentTag !== releaseData.tag_name) {
-            if (checkTime >= appBuildTimestamp - (10 * 60 * 1000)) {
-              hasNewerVersion = true;
-            }
-          }
-        } else if (releaseData.tag_name && releaseData.tag_name !== currentTag) {
+          hasNewerVersion = releaseTimestamp > appBuildTimestamp + MIN_TIME_DIFF_MS;
+        } else if (releaseData.tag_name) {
           hasNewerVersion = true;
         }
 
@@ -175,7 +179,11 @@ export function useAutoUpdate(): AutoUpdateState {
 
   const dismissUpdate = useCallback(() => {
     if (latestRelease?.tag_name) {
-      sessionStorage.setItem(DISMISSED_UPDATE_KEY, latestRelease.tag_name);
+      try {
+        localStorage.setItem(DISMISSED_UPDATE_KEY, latestRelease.tag_name);
+      } catch {
+        // Ignore storage failures (e.g. private mode); the prompt is still hidden now.
+      }
     }
     setUpdateAvailable(false);
   }, [latestRelease]);
