@@ -1262,6 +1262,16 @@ const App: React.FC = () => {
                     return; // Abort
                 }
 
+                // SECURITY: When committing a move (history growing by exactly one), verify the
+                // player whose turn it currently is (white or black) is the authenticated local user.
+                if (newMoveCount === currentMoveCount + 1 && currentUser?.uid) {
+                    const currentTurnUid = currentData.playerColors?.[currentData.turn];
+                    if (currentTurnUid !== currentUser.uid) {
+                        console.log("Transaction aborted: Not the current user's move.");
+                        return; // Abort
+                    }
+                }
+
                 return JSON.parse(JSON.stringify(newState));
             }, (error, committed) => {
                 if (error) {
@@ -1271,7 +1281,7 @@ const App: React.FC = () => {
                 }
             });
         }
-    }, [gameMode, gameRef]);
+    }, [gameMode, gameRef, currentUser]);
 
     const loadGameState = useCallback((state: GameState | null) => {
         if (!state) return;
