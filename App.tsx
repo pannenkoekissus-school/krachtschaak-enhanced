@@ -367,6 +367,10 @@ const App: React.FC = () => {
     const [authLoading, setAuthLoading] = useState(true);
     const [showAuthModal, setShowAuthModal] = useState(false);
     const [allMyGamesData, setAllMyGamesData] = useState<Record<string, GameState>>({});
+    const userGameIdsRef = useRef<Set<string>>(new Set());
+    const receivedGameIdsRef = useRef<Set<string>>(new Set());
+    const backfillInFlightRef = useRef<Set<string>>(new Set());
+    const backfillRunningRef = useRef(false);
     const [incomingChallenges, setIncomingChallenges] = useState<IncomingChallenge[]>([]);
     const [sentChallenges, setSentChallenges] = useState<SentChallenge[]>([]);
 
@@ -1998,6 +2002,7 @@ const App: React.FC = () => {
                 if (!currentGameKeys.includes(gid)) {
                     db.ref(`games/${gid}`).off('value', gameListeners[gid]);
                     delete gameListeners[gid];
+                    receivedGameIdsRef.current.delete(gid);
                     setAllMyGamesData(prev => {
                         const newState = { ...prev };
                         delete newState[gid];
@@ -2005,6 +2010,8 @@ const App: React.FC = () => {
                     });
                 }
             });
+
+            userGameIdsRef.current = new Set(currentGameKeys);
 
             // Add new listeners
             currentGameKeys.forEach(gid => {
@@ -2014,6 +2021,7 @@ const App: React.FC = () => {
                 const listener = (gSnap: any) => {
                     const gameData = gSnap.val() as GameState;
                     if (!gameData) {
+                        receivedGameIdsRef.current.delete(gid);
                         setAllMyGamesData(prev => {
                             const newState = { ...prev };
                             delete newState[gid];
@@ -2022,6 +2030,7 @@ const App: React.FC = () => {
                         return;
                     }
 
+                    receivedGameIdsRef.current.add(gid);
                     setAllMyGamesData(prev => ({ ...prev, [gid]: gameData }));
 
                     // WARP LOGIC (if not currently in this game)
@@ -2073,6 +2082,48 @@ const App: React.FC = () => {
 
         userGamesRef.on('value', onUserGamesUpdate);
 
+        // Keep processing until every game under userGames has been loaded into
+        // allMyGamesData. The real-time listeners deliver most games immediately,
+        // but on a flaky connection some may never arrive, so we reconcile any
+        // expected-but-missing games with a one-shot fetch and retry until they
+        // are all accounted for. Fully async, never blocks.
+        const backfillLoop = async () => {
+            if (backfillRunningRef.current) return;
+            backfillRunningRef.current = true;
+            try {
+                const expected = userGameIdsRef.current;
+                if (expected.size === 0) return;
+                const missing = [...expected].filter(
+                    gid => !receivedGameIdsRef.current.has(gid) && !backfillInFlightRef.current.has(gid)
+                );
+                if (missing.length === 0) return;
+
+                missing.forEach(gid => backfillInFlightRef.current.add(gid));
+                try {
+                    const results = await Promise.allSettled(missing.map(gid => db.ref(`games/${gid}`).once('value')));
+                    results.forEach((res, i) => {
+                        const gid = missing[i];
+                        backfillInFlightRef.current.delete(gid);
+                        if (res.status === 'fulfilled' && res.value.exists()) {
+                            receivedGameIdsRef.current.add(gid);
+                            const gameData = res.value.val() as GameState;
+                            setAllMyGamesData(prev => ({ ...prev, [gid]: gameData }));
+                        } else {
+                            console.error(`Backfill fetch failed for game ${gid}:`, res.status === 'rejected' ? res.reason : 'Game not found');
+                        }
+                    });
+                } catch (e) {
+                    console.error("Error during game backfill:", e);
+                    missing.forEach(gid => backfillInFlightRef.current.delete(gid));
+                }
+            } finally {
+                backfillRunningRef.current = false;
+            }
+        };
+
+        const backfillIntervalId = window.setInterval(backfillLoop, 10000);
+        backfillLoop();
+
         // Challenge Listeners
         const challengesRef = db.ref(`challenges/${currentUser.uid}`);
         const challengesListener = (snapshot: any) => {
@@ -2105,6 +2156,8 @@ const App: React.FC = () => {
         sentChallengesRef.on('value', sentListener);
 
         return () => {
+            window.clearInterval(backfillIntervalId);
+            backfillRunningRef.current = false;
             userGamesRef.off('value', onUserGamesUpdate);
             Object.entries(gameListeners).forEach(([gid, l]) => {
                 db.ref(`games/${gid}`).off('value', l);
@@ -2246,13 +2299,22 @@ const App: React.FC = () => {
             }
 
             const gameIds = Object.keys(userGamesObj);
-            const gamePromises = gameIds.map(id => db.ref(`games/${id}`).once('value'));
-            const gameSnapshots = await Promise.all(gamePromises);
+            // Load every game, but don't let one failed fetch (bad internet) kill
+            // the whole batch — use whatever did load and retry-friendly semantics.
+            const gameResults = await Promise.allSettled(gameIds.map(id => db.ref(`games/${id}`).once('value')));
+            const gameSnapshots: { key: string, snap: any }[] = [];
+            gameResults.forEach((res, i) => {
+                if (res.status === 'fulfilled' && res.value.exists()) {
+                    gameSnapshots.push({ key: gameIds[i], snap: res.value });
+                } else {
+                    console.error("Error loading game on continue:", res.status === 'rejected' ? res.reason : 'Game not found');
+                }
+            });
 
             const activeRealTimeGames: { id: string, lastMoveTime: number }[] = [];
             const activeCorrespondenceGames: { id: string, timeLeft: number }[] = [];
 
-            gameSnapshots.forEach(snap => {
+            gameSnapshots.forEach(({ key: gameId, snap }) => {
                 const game = snap.val() as GameState;
                 if (game && game.status === 'playing') {
                     const myColor = game.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
@@ -2260,7 +2322,7 @@ const App: React.FC = () => {
                     if (game.timerSettings && 'initialTime' in game.timerSettings) {
                         // Priority 1: Any active Real-time game
                         const lastMoveTime = game.turnStartTime || 0;
-                        activeRealTimeGames.push({ id: snap.key!, lastMoveTime: lastMoveTime + (game.turn === myColor ? 100000000000 : 0) }); // Hack to boost my turn priority
+                        activeRealTimeGames.push({ id: gameId, lastMoveTime: lastMoveTime + (game.turn === myColor ? 100000000000 : 0) }); // Hack to boost my turn priority
                     } else {
                         // Priority 2: Correspondence game where it IS my turn
                         if (game.turn === myColor) {
@@ -2268,7 +2330,7 @@ const App: React.FC = () => {
                             if (game.timerSettings && 'daysPerMove' in game.timerSettings && game.moveDeadline) {
                                 timeLeft = Math.max(0, game.moveDeadline - Date.now());
                             }
-                            activeCorrespondenceGames.push({ id: snap.key!, timeLeft });
+                            activeCorrespondenceGames.push({ id: gameId, timeLeft });
                         }
                     }
                 }
@@ -2279,7 +2341,7 @@ const App: React.FC = () => {
                 activeRealTimeGames.sort((a, b) => b.lastMoveTime - a.lastMoveTime); // Most recent / active first
                 const gameId = activeRealTimeGames[0].id;
                 const gameSnapshot = gameSnapshots.find(s => s.key === gameId)!;
-                const gameData = gameSnapshot.val() as GameState;
+                const gameData = gameSnapshot.snap.val() as GameState;
                 const myColor = gameData.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
 
                 setLobbyView('current_games');
@@ -2292,7 +2354,7 @@ const App: React.FC = () => {
                 activeCorrespondenceGames.sort((a, b) => a.timeLeft - b.timeLeft); // Least time left first
                 const gameId = activeCorrespondenceGames[0].id;
                 const gameSnapshot = gameSnapshots.find(s => s.key === gameId)!;
-                const gameData = gameSnapshot.val() as GameState;
+                const gameData = gameSnapshot.snap.val() as GameState;
                 const myColor = gameData.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
 
                 setLobbyView('current_games');
