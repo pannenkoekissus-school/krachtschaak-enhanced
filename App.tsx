@@ -223,6 +223,16 @@ const App: React.FC = () => {
     const [showPowerRings, _setShowPowerRings] = useState(() => localStorage.getItem('showPowerRings') !== 'false');
     const [showOriginalType, _setShowOriginalType] = useState(() => localStorage.getItem('showOriginalType') !== 'false');
     const [soundsEnabled, _setSoundsEnabled] = useState(() => localStorage.getItem('soundsEnabled') !== 'false');
+    // Refs mirror volatile values so the game-listening subscribers can read the
+    // latest values without tearing down and re-creating listeners on every change.
+    const gameIdRef = useRef(gameId);
+    const gameModeRef = useRef(gameMode);
+    const soundsEnabledRef = useRef(soundsEnabled);
+    useEffect(() => {
+        gameIdRef.current = gameId;
+        gameModeRef.current = gameMode;
+        soundsEnabledRef.current = soundsEnabled;
+    });
     const [autoQueen, _setAutoQueen] = useState<AutoSetting>(() => (localStorage.getItem('autoQueen') as AutoSetting) || AutoSetting.Never);
     const [autoEnPassant, _setAutoEnPassant] = useState<AutoSetting>(() => (localStorage.getItem('autoEnPassant') as AutoSetting) || AutoSetting.Never);
     const [notificationsEnabled, _setNotificationsEnabled] = useState(() => localStorage.getItem('notificationsEnabled') === 'true');
@@ -1766,6 +1776,10 @@ const App: React.FC = () => {
     }, [commitNewGameState, handleGameOver, gameMode, localPromotionState, localAmbiguousEnPassantState]);
 
     const [serverOffset, setServerOffset] = useState<number>(0);
+    const serverOffsetRef = useRef(serverOffset);
+    useEffect(() => {
+        serverOffsetRef.current = serverOffset;
+    });
 
     useEffect(() => {
         if (!isFirebaseConfigured) return;
@@ -2034,7 +2048,7 @@ const App: React.FC = () => {
                     setAllMyGamesData(prev => ({ ...prev, [gid]: gameData }));
 
                     // WARP LOGIC (if not currently in this game)
-                    if (gid !== gameId) {
+                    if (gid !== gameIdRef.current) {
                         const myColor = gameData.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
 
                         // Tournament Auto-Warp Logic:
@@ -2047,7 +2061,7 @@ const App: React.FC = () => {
                                                      statusRef.current !== 'promotion' &&
                                                      statusRef.current !== 'ambiguous_en_passant';
 
-                            const canWarpToTournament = gameMode !== 'online_playing' || isCurrentGameOver;
+                            const canWarpToTournament = gameModeRef.current !== 'online_playing' || isCurrentGameOver;
 
                             if (canWarpToTournament) {
                                 handleOnlineGameStart(gid, myColor);
@@ -2061,11 +2075,11 @@ const App: React.FC = () => {
                             if (isRealtime) {
                                 const timeAtTurnStart = gameData.playerTimes?.[myColor] || 0;
                                 const turnStartTime = gameData.turnStartTime || 0;
-                                const elapsed = (Date.now() - turnStartTime + serverOffset) / 1000;
+                                const elapsed = (Date.now() - turnStartTime + serverOffsetRef.current) / 1000;
                                 const remaining = timeAtTurnStart - elapsed;
 
                                 if (remaining <= 10 && remaining > 0) {
-                                    if (soundsEnabled && !hasPlayedLowTimeSoundRef.current) {
+                                    if (soundsEnabledRef.current && !hasPlayedLowTimeSoundRef.current) {
                                         playLowTimeSound();
                                         hasPlayedLowTimeSoundRef.current = true;
                                     }
@@ -2158,6 +2172,9 @@ const App: React.FC = () => {
         return () => {
             window.clearInterval(backfillIntervalId);
             backfillRunningRef.current = false;
+            userGameIdsRef.current = new Set();
+            receivedGameIdsRef.current = new Set();
+            backfillInFlightRef.current = new Set();
             userGamesRef.off('value', onUserGamesUpdate);
             Object.entries(gameListeners).forEach(([gid, l]) => {
                 db.ref(`games/${gid}`).off('value', l);
@@ -2165,7 +2182,7 @@ const App: React.FC = () => {
             challengesRef.off('value', challengesListener);
             sentChallengesRef.off('value', sentListener);
         };
-    }, [currentUser, isFirebaseConfigured, gameId, serverOffset, soundsEnabled, handleOnlineGameStart, gameMode]);
+    }, [currentUser, isFirebaseConfigured]);
 
     // Effects to sync settings from Firebase on login
     useEffect(() => {
