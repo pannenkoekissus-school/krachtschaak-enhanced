@@ -151,6 +151,8 @@ const PlayerRatingsModal: React.FC<{
         </div>
     );
 };
+const MAX_GAME_FETCH_ATTEMPTS = 3;
+
 const PlayerGameHistoryModal: React.FC<{
     userId: string;
     onClose: () => void;
@@ -161,6 +163,7 @@ const PlayerGameHistoryModal: React.FC<{
     const [loading, setLoading] = useState(true);
     const [loadingGames, setLoadingGames] = useState(false);
     const [gamesCache, setGamesCache] = useState<Record<string, GameState>>({});
+    const [fetchFailures, setFetchFailures] = useState<Record<string, number>>({});
     const [historyFilters, setHistoryFilters] = useState<Record<string, boolean>>({
         hyperbullet: true, bullet: true, blitz: true, rapid: true, classical: true, daily: true, unlimited: true
     });
@@ -265,27 +268,45 @@ const PlayerGameHistoryModal: React.FC<{
     useEffect(() => {
         if (visibleMetaSlice.length === 0) return;
 
-        const fetchFullGames = async () => {
-            const missingIds = visibleMetaSlice.filter(meta => !gamesCache[meta.id]).map(meta => meta.id);
-            if (missingIds.length === 0) return;
+        const missingIds = visibleMetaSlice
+            .filter(meta => !gamesCache[meta.id])
+            .filter(meta => (fetchFailures[meta.id] || 0) < MAX_GAME_FETCH_ATTEMPTS)
+            .map(meta => meta.id);
+        if (missingIds.length === 0) return;
 
+        const fetchFullGames = async () => {
             setLoadingGames(true);
             try {
-                const fetchPromises = missingIds.map(async (gid) => {
+                const results = await Promise.allSettled(missingIds.map(async (gid) => {
                     const snap = await db.ref(`games/${gid}`).once('value');
                     return { id: gid, data: snap.val() as GameState };
+                }));
+
+                const successes: { id: string, data: GameState }[] = [];
+                const newFailures: Record<string, number> = {};
+
+                results.forEach((res, i) => {
+                    const gid = missingIds[i];
+                    if (res.status === 'fulfilled' && res.value.data) {
+                        successes.push(res.value);
+                    } else {
+                        newFailures[gid] = (fetchFailures[gid] || 0) + 1;
+                        console.error(`Error fetching game ${gid}:`, res.status === 'rejected' ? res.reason : 'Game not found');
+                    }
                 });
-                const fetched = await Promise.all(fetchPromises);
-                
-                setGamesCache(prev => {
-                    const updated = { ...prev };
-                    fetched.forEach(item => {
-                        if (item.data) {
+
+                if (successes.length > 0) {
+                    setGamesCache(prev => {
+                        const updated = { ...prev };
+                        successes.forEach(item => {
                             updated[item.id] = item.data;
-                        }
+                        });
+                        return updated;
                     });
-                    return updated;
-                });
+                }
+                if (Object.keys(newFailures).length > 0) {
+                    setFetchFailures(prev => ({ ...prev, ...newFailures }));
+                }
             } catch (err) {
                 console.error("Error fetching full games details:", err);
             } finally {
@@ -294,16 +315,7 @@ const PlayerGameHistoryModal: React.FC<{
         };
 
         fetchFullGames();
-    }, [visibleMetaSlice]);
-
-    const displayedGames = useMemo(() => {
-        return visibleMetaSlice
-            .map(meta => ({
-                id: meta.id,
-                data: gamesCache[meta.id]
-            }))
-            .filter(g => g.data !== undefined);
-    }, [visibleMetaSlice, gamesCache]);
+    }, [visibleMetaSlice, gamesCache, fetchFailures]);
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50 p-4">
@@ -348,27 +360,50 @@ const PlayerGameHistoryModal: React.FC<{
                     <div className="flex-grow flex items-center justify-center py-12 text-gray-500 italic">
                         No games found with these filters.
                     </div>
-                ) : !loading && displayedGames.length === 0 && loadingGames ? (
+                ) : !loading && visibleMetaSlice.every(meta => !gamesCache[meta.id]) && loadingGames ? (
                     <div className="flex-grow flex items-center justify-center py-12">
                         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400"></div>
                     </div>
                 ) : (
                     <div className="overflow-y-auto pr-2 space-y-3">
-                        {displayedGames.map(game => {
-                            const whitePlayer = game.data.players && game.data.playerColors?.white ? game.data.players[game.data.playerColors.white] : null;
-                            const blackPlayer = game.data.players && game.data.playerColors?.black ? game.data.players[game.data.playerColors.black] : null;
+                        {visibleMetaSlice.map(meta => {
+                            const game = gamesCache[meta.id];
+                            if (!game) {
+                                const failed = (fetchFailures[meta.id] || 0) >= MAX_GAME_FETCH_ATTEMPTS;
+                                return (
+                                    <div key={meta.id} className="bg-gray-700 p-4 rounded-xl border border-gray-600 flex justify-between items-center">
+                                        <div className="flex items-center gap-3 text-sm text-gray-400">
+                                            {failed ? (
+                                                <>Failed to load this game.</>
+                                            ) : (
+                                                <><span className="animate-spin inline-block h-4 w-4 border-b-2 border-blue-400 rounded-full"></span> Loading...</>
+                                            )}
+                                        </div>
+                                        {failed && (
+                                            <button
+                                                onClick={() => setFetchFailures(prev => { const next = { ...prev }; delete next[meta.id]; return next; })}
+                                                className="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-bold transition-colors"
+                                            >
+                                                Retry
+                                            </button>
+                                        )}
+                                    </div>
+                                );
+                            }
+                            const whitePlayer = game.players && game.playerColors?.white ? game.players[game.playerColors.white] : null;
+                            const blackPlayer = game.players && game.playerColors?.black ? game.players[game.playerColors.black] : null;
 
-                            const isDraw = !game.data.winner;
+                            const isDraw = !game.winner;
                             let isWin = false;
-                            if (game.data.winner && game.data.playerColors) {
-                                const winnerColor = game.data.winner.toLowerCase() as 'white' | 'black';
-                                isWin = game.data.playerColors[winnerColor] === userId;
+                            if (game.winner && game.playerColors) {
+                                const winnerColor = game.winner.toLowerCase() as 'white' | 'black';
+                                isWin = game.playerColors[winnerColor] === userId;
                             }
                             const resultText = isDraw ? 'Draw' : (isWin ? 'Win' : 'Loss');
                             const resultColor = isDraw ? 'text-yellow-500' : (isWin ? 'text-green-500' : 'text-red-500');
 
                             return (
-                                <div key={game.id} className="bg-gray-700 p-4 rounded-xl border border-gray-600 flex flex-col md:flex-row justify-between items-center hover:bg-gray-650 transition-colors">
+                                <div key={meta.id} className="bg-gray-700 p-4 rounded-xl border border-gray-600 flex flex-col md:flex-row justify-between items-center hover:bg-gray-650 transition-colors">
                                     <div className="flex-grow mb-3 md:mb-0">
                                         <div className="flex items-center gap-2 mb-1">
                                             <span className="font-bold text-white">
@@ -376,7 +411,7 @@ const PlayerGameHistoryModal: React.FC<{
                                             </span>
                                         </div>
                                         <div className="text-sm text-gray-400">
-                                            {game.data.ratingCategory || 'Casual'} • {game.data.isRated ? 'Rated' : 'Unrated'} • {game.data.completedAt ? new Date(game.data.completedAt).toLocaleDateString() : 'Unknown Date'}
+                                            {game.ratingCategory || 'Casual'} • {game.isRated ? 'Rated' : 'Unrated'} • {game.completedAt ? new Date(game.completedAt).toLocaleDateString() : 'Unknown Date'}
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-2">
@@ -385,14 +420,14 @@ const PlayerGameHistoryModal: React.FC<{
                                         </span>
                                         <div className="flex gap-2">
                                             <button
-                                                onClick={() => onReview(game.data)}
+                                                onClick={() => onReview(game)}
                                                 className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-bold transition-colors"
                                             >
                                                 Review
                                             </button>
                                             <button
                                                 onClick={() => {
-                                                    onAnalyse(game.data);
+                                                    onAnalyse(game);
                                                     onClose();
                                                 }}
                                                 className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm font-bold transition-colors"

@@ -223,6 +223,16 @@ const App: React.FC = () => {
     const [showPowerRings, _setShowPowerRings] = useState(() => localStorage.getItem('showPowerRings') !== 'false');
     const [showOriginalType, _setShowOriginalType] = useState(() => localStorage.getItem('showOriginalType') !== 'false');
     const [soundsEnabled, _setSoundsEnabled] = useState(() => localStorage.getItem('soundsEnabled') !== 'false');
+    // Refs mirror volatile values so the game-listening subscribers can read the
+    // latest values without tearing down and re-creating listeners on every change.
+    const gameIdRef = useRef(gameId);
+    const gameModeRef = useRef(gameMode);
+    const soundsEnabledRef = useRef(soundsEnabled);
+    useEffect(() => {
+        gameIdRef.current = gameId;
+        gameModeRef.current = gameMode;
+        soundsEnabledRef.current = soundsEnabled;
+    });
     const [autoQueen, _setAutoQueen] = useState<AutoSetting>(() => (localStorage.getItem('autoQueen') as AutoSetting) || AutoSetting.Never);
     const [autoEnPassant, _setAutoEnPassant] = useState<AutoSetting>(() => (localStorage.getItem('autoEnPassant') as AutoSetting) || AutoSetting.Never);
     const [notificationsEnabled, _setNotificationsEnabled] = useState(() => localStorage.getItem('notificationsEnabled') === 'true');
@@ -367,6 +377,10 @@ const App: React.FC = () => {
     const [authLoading, setAuthLoading] = useState(true);
     const [showAuthModal, setShowAuthModal] = useState(false);
     const [allMyGamesData, setAllMyGamesData] = useState<Record<string, GameState>>({});
+    const userGameIdsRef = useRef<Set<string>>(new Set());
+    const receivedGameIdsRef = useRef<Set<string>>(new Set());
+    const backfillInFlightRef = useRef<Set<string>>(new Set());
+    const backfillRunningRef = useRef(false);
     const [incomingChallenges, setIncomingChallenges] = useState<IncomingChallenge[]>([]);
     const [sentChallenges, setSentChallenges] = useState<SentChallenge[]>([]);
 
@@ -1262,6 +1276,16 @@ const App: React.FC = () => {
                     return; // Abort
                 }
 
+                // SECURITY: When committing a move (history growing by exactly one), verify the
+                // player whose turn it currently is (white or black) is the authenticated local user.
+                if (newMoveCount === currentMoveCount + 1 && currentUser?.uid) {
+                    const currentTurnUid = currentData.playerColors?.[currentData.turn];
+                    if (currentTurnUid !== currentUser.uid) {
+                        console.log("Transaction aborted: Not the current user's move.");
+                        return; // Abort
+                    }
+                }
+
                 return JSON.parse(JSON.stringify(newState));
             }, (error, committed) => {
                 if (error) {
@@ -1271,7 +1295,7 @@ const App: React.FC = () => {
                 }
             });
         }
-    }, [gameMode, gameRef]);
+    }, [gameMode, gameRef, currentUser]);
 
     const loadGameState = useCallback((state: GameState | null) => {
         if (!state) return;
@@ -1752,6 +1776,10 @@ const App: React.FC = () => {
     }, [commitNewGameState, handleGameOver, gameMode, localPromotionState, localAmbiguousEnPassantState]);
 
     const [serverOffset, setServerOffset] = useState<number>(0);
+    const serverOffsetRef = useRef(serverOffset);
+    useEffect(() => {
+        serverOffsetRef.current = serverOffset;
+    });
 
     useEffect(() => {
         if (!isFirebaseConfigured) return;
@@ -1988,6 +2016,7 @@ const App: React.FC = () => {
                 if (!currentGameKeys.includes(gid)) {
                     db.ref(`games/${gid}`).off('value', gameListeners[gid]);
                     delete gameListeners[gid];
+                    receivedGameIdsRef.current.delete(gid);
                     setAllMyGamesData(prev => {
                         const newState = { ...prev };
                         delete newState[gid];
@@ -1995,6 +2024,8 @@ const App: React.FC = () => {
                     });
                 }
             });
+
+            userGameIdsRef.current = new Set(currentGameKeys);
 
             // Add new listeners
             currentGameKeys.forEach(gid => {
@@ -2004,6 +2035,7 @@ const App: React.FC = () => {
                 const listener = (gSnap: any) => {
                     const gameData = gSnap.val() as GameState;
                     if (!gameData) {
+                        receivedGameIdsRef.current.delete(gid);
                         setAllMyGamesData(prev => {
                             const newState = { ...prev };
                             delete newState[gid];
@@ -2012,10 +2044,11 @@ const App: React.FC = () => {
                         return;
                     }
 
+                    receivedGameIdsRef.current.add(gid);
                     setAllMyGamesData(prev => ({ ...prev, [gid]: gameData }));
 
                     // WARP LOGIC (if not currently in this game)
-                    if (gid !== gameId) {
+                    if (gid !== gameIdRef.current) {
                         const myColor = gameData.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
 
                         // Tournament Auto-Warp Logic:
@@ -2028,7 +2061,7 @@ const App: React.FC = () => {
                                                      statusRef.current !== 'promotion' &&
                                                      statusRef.current !== 'ambiguous_en_passant';
 
-                            const canWarpToTournament = gameMode !== 'online_playing' || isCurrentGameOver;
+                            const canWarpToTournament = gameModeRef.current !== 'online_playing' || isCurrentGameOver;
 
                             if (canWarpToTournament) {
                                 handleOnlineGameStart(gid, myColor);
@@ -2042,11 +2075,11 @@ const App: React.FC = () => {
                             if (isRealtime) {
                                 const timeAtTurnStart = gameData.playerTimes?.[myColor] || 0;
                                 const turnStartTime = gameData.turnStartTime || 0;
-                                const elapsed = (Date.now() - turnStartTime + serverOffset) / 1000;
+                                const elapsed = (Date.now() - turnStartTime + serverOffsetRef.current) / 1000;
                                 const remaining = timeAtTurnStart - elapsed;
 
                                 if (remaining <= 10 && remaining > 0) {
-                                    if (soundsEnabled && !hasPlayedLowTimeSoundRef.current) {
+                                    if (soundsEnabledRef.current && !hasPlayedLowTimeSoundRef.current) {
                                         playLowTimeSound();
                                         hasPlayedLowTimeSoundRef.current = true;
                                     }
@@ -2062,6 +2095,48 @@ const App: React.FC = () => {
         };
 
         userGamesRef.on('value', onUserGamesUpdate);
+
+        // Keep processing until every game under userGames has been loaded into
+        // allMyGamesData. The real-time listeners deliver most games immediately,
+        // but on a flaky connection some may never arrive, so we reconcile any
+        // expected-but-missing games with a one-shot fetch and retry until they
+        // are all accounted for. Fully async, never blocks.
+        const backfillLoop = async () => {
+            if (backfillRunningRef.current) return;
+            backfillRunningRef.current = true;
+            try {
+                const expected = userGameIdsRef.current;
+                if (expected.size === 0) return;
+                const missing = [...expected].filter(
+                    gid => !receivedGameIdsRef.current.has(gid) && !backfillInFlightRef.current.has(gid)
+                );
+                if (missing.length === 0) return;
+
+                missing.forEach(gid => backfillInFlightRef.current.add(gid));
+                try {
+                    const results = await Promise.allSettled(missing.map(gid => db.ref(`games/${gid}`).once('value')));
+                    results.forEach((res, i) => {
+                        const gid = missing[i];
+                        backfillInFlightRef.current.delete(gid);
+                        if (res.status === 'fulfilled' && res.value.exists()) {
+                            receivedGameIdsRef.current.add(gid);
+                            const gameData = res.value.val() as GameState;
+                            setAllMyGamesData(prev => ({ ...prev, [gid]: gameData }));
+                        } else {
+                            console.error(`Backfill fetch failed for game ${gid}:`, res.status === 'rejected' ? res.reason : 'Game not found');
+                        }
+                    });
+                } catch (e) {
+                    console.error("Error during game backfill:", e);
+                    missing.forEach(gid => backfillInFlightRef.current.delete(gid));
+                }
+            } finally {
+                backfillRunningRef.current = false;
+            }
+        };
+
+        const backfillIntervalId = window.setInterval(backfillLoop, 10000);
+        backfillLoop();
 
         // Challenge Listeners
         const challengesRef = db.ref(`challenges/${currentUser.uid}`);
@@ -2095,6 +2170,11 @@ const App: React.FC = () => {
         sentChallengesRef.on('value', sentListener);
 
         return () => {
+            window.clearInterval(backfillIntervalId);
+            backfillRunningRef.current = false;
+            userGameIdsRef.current = new Set();
+            receivedGameIdsRef.current = new Set();
+            backfillInFlightRef.current = new Set();
             userGamesRef.off('value', onUserGamesUpdate);
             Object.entries(gameListeners).forEach(([gid, l]) => {
                 db.ref(`games/${gid}`).off('value', l);
@@ -2102,7 +2182,7 @@ const App: React.FC = () => {
             challengesRef.off('value', challengesListener);
             sentChallengesRef.off('value', sentListener);
         };
-    }, [currentUser, isFirebaseConfigured, gameId, serverOffset, soundsEnabled, handleOnlineGameStart, gameMode]);
+    }, [currentUser, isFirebaseConfigured]);
 
     // Effects to sync settings from Firebase on login
     useEffect(() => {
@@ -2236,13 +2316,22 @@ const App: React.FC = () => {
             }
 
             const gameIds = Object.keys(userGamesObj);
-            const gamePromises = gameIds.map(id => db.ref(`games/${id}`).once('value'));
-            const gameSnapshots = await Promise.all(gamePromises);
+            // Load every game, but don't let one failed fetch (bad internet) kill
+            // the whole batch — use whatever did load and retry-friendly semantics.
+            const gameResults = await Promise.allSettled(gameIds.map(id => db.ref(`games/${id}`).once('value')));
+            const gameSnapshots: { key: string, snap: any }[] = [];
+            gameResults.forEach((res, i) => {
+                if (res.status === 'fulfilled' && res.value.exists()) {
+                    gameSnapshots.push({ key: gameIds[i], snap: res.value });
+                } else {
+                    console.error("Error loading game on continue:", res.status === 'rejected' ? res.reason : 'Game not found');
+                }
+            });
 
             const activeRealTimeGames: { id: string, lastMoveTime: number }[] = [];
             const activeCorrespondenceGames: { id: string, timeLeft: number }[] = [];
 
-            gameSnapshots.forEach(snap => {
+            gameSnapshots.forEach(({ key: gameId, snap }) => {
                 const game = snap.val() as GameState;
                 if (game && game.status === 'playing') {
                     const myColor = game.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
@@ -2250,7 +2339,7 @@ const App: React.FC = () => {
                     if (game.timerSettings && 'initialTime' in game.timerSettings) {
                         // Priority 1: Any active Real-time game
                         const lastMoveTime = game.turnStartTime || 0;
-                        activeRealTimeGames.push({ id: snap.key!, lastMoveTime: lastMoveTime + (game.turn === myColor ? 100000000000 : 0) }); // Hack to boost my turn priority
+                        activeRealTimeGames.push({ id: gameId, lastMoveTime: lastMoveTime + (game.turn === myColor ? 100000000000 : 0) }); // Hack to boost my turn priority
                     } else {
                         // Priority 2: Correspondence game where it IS my turn
                         if (game.turn === myColor) {
@@ -2258,7 +2347,7 @@ const App: React.FC = () => {
                             if (game.timerSettings && 'daysPerMove' in game.timerSettings && game.moveDeadline) {
                                 timeLeft = Math.max(0, game.moveDeadline - Date.now());
                             }
-                            activeCorrespondenceGames.push({ id: snap.key!, timeLeft });
+                            activeCorrespondenceGames.push({ id: gameId, timeLeft });
                         }
                     }
                 }
@@ -2269,7 +2358,7 @@ const App: React.FC = () => {
                 activeRealTimeGames.sort((a, b) => b.lastMoveTime - a.lastMoveTime); // Most recent / active first
                 const gameId = activeRealTimeGames[0].id;
                 const gameSnapshot = gameSnapshots.find(s => s.key === gameId)!;
-                const gameData = gameSnapshot.val() as GameState;
+                const gameData = gameSnapshot.snap.val() as GameState;
                 const myColor = gameData.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
 
                 setLobbyView('current_games');
@@ -2282,7 +2371,7 @@ const App: React.FC = () => {
                 activeCorrespondenceGames.sort((a, b) => a.timeLeft - b.timeLeft); // Least time left first
                 const gameId = activeCorrespondenceGames[0].id;
                 const gameSnapshot = gameSnapshots.find(s => s.key === gameId)!;
-                const gameData = gameSnapshot.val() as GameState;
+                const gameData = gameSnapshot.snap.val() as GameState;
                 const myColor = gameData.playerColors?.white === currentUser.uid ? Color.White : Color.Black;
 
                 setLobbyView('current_games');
@@ -4517,6 +4606,23 @@ const App: React.FC = () => {
 
                     <div className="mt-4 text-xs text-gray-500">
                         Bug reports and feature requests: <a href="mailto:pannenkoekissus@gmail.com" className="text-gray-400 hover:text-blue-400 underline transition-colors">pannenkoekissus@gmail.com</a>
+                    </div>
+
+                    <div className="mt-8 w-full max-w-md flex items-center justify-center gap-2 border-t border-gray-800 pt-4 text-xs text-gray-500">
+                        <span>Made by pannenkoekissus</span>
+                        <span className="text-gray-700">•</span>
+                        <a
+                            href="https://github.com/pannenkoekissus/krachtschaak-enhanced"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1.5 text-gray-400 hover:text-white transition-colors"
+                            aria-label="View source code on GitHub"
+                        >
+                            <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor" aria-hidden="true">
+                                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+                            </svg>
+                            <span>GitHub</span>
+                        </a>
                     </div>
 
                     {showLocalSetup && (
