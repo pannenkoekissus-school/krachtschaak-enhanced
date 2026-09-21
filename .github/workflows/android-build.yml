@@ -153,12 +153,66 @@ jobs:
           
           echo "APK_PATH=krachtschaak.apk" >> $GITHUB_ENV
 
+      # Genereer release notes op basis van de commits van deze push
+      - name: Generate Release Notes
+        id: release_notes
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            // Commits van deze push (leeg bij workflow_dispatch)
+            let messages = (context.payload.commits || []).map((c) => c.message || '');
+
+            // Bij een handmatige build vergelijken we met de vorige release
+            if (messages.length === 0) {
+              try {
+                const { data: releases } = await github.rest.repos.listReleases({
+                  owner,
+                  repo,
+                  per_page: 1,
+                });
+                const prevTag = releases && releases.length > 0 ? releases[0].tag_name : undefined;
+                if (prevTag) {
+                  const { data: comparison } = await github.rest.repos.compareCommits({
+                    owner,
+                    repo,
+                    base: prevTag,
+                    head: 'HEAD',
+                  });
+                  messages = (comparison.commits || []).map((c) => c.commit.message || '');
+                }
+              } catch (e) {
+                console.warn('Kon vorige release commits niet ophalen:', e);
+              }
+            }
+
+            const lines = messages
+              .map((msg) => {
+                const [subject = '', ...rest] = String(msg).split('\n');
+                // Gebruik de "extended description" (rest van het commit bericht),
+                // of de commit message zelf als die leeg is.
+                const extended = rest.join('\n').replace(/\s+/g, ' ').trim();
+                return extended || subject.trim();
+              })
+              .filter(Boolean);
+
+            const notes = lines.length > 0
+              ? "## What's Changed\n" + lines.map((l) => '- ' + l).join('\n')
+              : '';
+
+            // Schrijf rechtstreeks naar een bestand zodat newlines altijd behouden blijven
+            // (GitHub rendert deze dan als echte bullet points op de release pagina)
+            require('fs').writeFileSync('release_notes.md', notes, 'utf8');
+            core.setOutput('notes', notes);
+
       # Maak de release aan met de gegenereerde tag
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag_gen.outputs.new_tag }}
           name: ${{ steps.tag_gen.outputs.new_tag }}
+          body_path: release_notes.md
           # We gebruiken de signed APK van de 'sign_app' stap
           files: ${{ env.APK_PATH }}
           make_latest: true

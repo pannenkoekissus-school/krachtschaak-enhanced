@@ -12,6 +12,60 @@ interface UpdateModalProps {
   downloadProgress?: number;
 }
 
+interface ParsedReleaseNotes {
+  summary: string;
+  changes: string[];
+}
+
+function cleanBullet(text: string): string {
+  return text
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+function parseReleaseNotes(body: string): ParsedReleaseNotes {
+  const summaryLines: string[] = [];
+  const changes: string[] = [];
+  let inChanges = false;
+
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    const isHeading = /^#{1,6}\s+/.test(trimmed);
+
+    if (isHeading && /what'?s changed/i.test(trimmed)) {
+      inChanges = true;
+      continue;
+    }
+
+    const bullet = trimmed.match(/^[-*+]\s+(.*)$/);
+    if (bullet) {
+      changes.push(cleanBullet(bullet[1]));
+    } else if (inChanges) {
+      if (isHeading || trimmed.startsWith('**Full Changelog')) {
+        inChanges = false;
+        if (trimmed) summaryLines.push(trimmed);
+      } else if (trimmed) {
+        if (changes.length > 0) {
+          changes[changes.length - 1] += ' ' + cleanBullet(trimmed);
+        } else {
+          summaryLines.push(trimmed);
+        }
+      }
+    } else {
+      summaryLines.push(line);
+    }
+  }
+
+  return {
+    summary: summaryLines.join('\n').trim(),
+    changes,
+  };
+}
+
 const UpdateModal: React.FC<UpdateModalProps> = ({
   release,
   currentTag,
@@ -27,6 +81,8 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
         timeStyle: 'short',
       })
     : '';
+
+  const parsedNotes = release?.body ? parseReleaseNotes(release.body) : null;
 
   return (
     <div
@@ -86,11 +142,20 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
             </div>
           )}
 
-          {release?.body && (
+          {parsedNotes && (parsedNotes.summary || parsedNotes.changes.length > 0) && (
             <div className="mt-1 pt-2 border-t border-gray-700/50">
               <p className="text-xs font-bold text-gray-300 mb-1">Release notes:</p>
-              <div className="text-xs text-gray-400 max-h-24 overflow-y-auto whitespace-pre-wrap leading-relaxed pr-1 custom-scrollbar">
-                {release.body}
+              <div className="text-xs text-gray-400 max-h-24 overflow-y-auto leading-relaxed pr-1 custom-scrollbar">
+                {parsedNotes.summary && (
+                  <p className="whitespace-pre-wrap mb-2">{parsedNotes.summary}</p>
+                )}
+                {parsedNotes.changes.length > 0 && (
+                  <ul className="list-disc pl-4 space-y-1">
+                    {parsedNotes.changes.map((item, i) => (
+                      <li key={i}>{item}</li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
           )}
