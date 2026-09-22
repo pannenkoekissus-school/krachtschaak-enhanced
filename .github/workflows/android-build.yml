@@ -161,30 +161,32 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
 
-            // Commits van deze push (leeg bij workflow_dispatch)
-            let messages = (context.payload.commits || []).map((c) => c.message || '');
-
-            // Bij een handmatige build vergelijken we met de vorige release
-            if (messages.length === 0) {
-              try {
-                const { data: releases } = await github.rest.repos.listReleases({
+            // Haal alle commits sinds de laatste release op, zodat ook commits
+            // van geblokte pushes (zonder release) in de release notes terechtkomen
+            let messages = [];
+            try {
+              const { data: releases } = await github.rest.repos.listReleases({
+                owner,
+                repo,
+                per_page: 1,
+              });
+              const prevTag = releases && releases.length > 0 ? releases[0].tag_name : undefined;
+              if (prevTag) {
+                const { data: comparison } = await github.rest.repos.compareCommits({
                   owner,
                   repo,
-                  per_page: 1,
+                  base: prevTag,
+                  head: context.sha,
                 });
-                const prevTag = releases && releases.length > 0 ? releases[0].tag_name : undefined;
-                if (prevTag) {
-                  const { data: comparison } = await github.rest.repos.compareCommits({
-                    owner,
-                    repo,
-                    base: prevTag,
-                    head: 'HEAD',
-                  });
-                  messages = (comparison.commits || []).map((c) => c.commit.message || '');
-                }
-              } catch (e) {
-                console.warn('Kon vorige release commits niet ophalen:', e);
+                messages = (comparison.commits || []).map((c) => c.commit.message || '');
               }
+            } catch (e) {
+              console.warn('Kon vorige release commits niet ophalen:', e);
+            }
+
+            // Geen vorige release gevonden: gebruik de commits van deze push als fallback
+            if (messages.length === 0) {
+              messages = (context.payload.commits || []).map((c) => c.message || '');
             }
 
             const lines = messages
