@@ -17,9 +17,9 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            // Haal de commit messages op (geeft een lege array bij workflow_dispatch)
+            // Haal alleen de laatste commit message op (geeft een lege string bij workflow_dispatch)
             const messages = ${{ toJson(github.event.commits.*.message) }} || [];
-            const combined = messages.join(' ').toLowerCase();
+            const combined = (messages.length > 0 ? messages[messages.length - 1] : '').toLowerCase();
             
             // De woorden die we willen blokkeren
             const forbidden = ['no-app', 'no app', 'geen-app', 'geen app'];
