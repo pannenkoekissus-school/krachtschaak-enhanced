@@ -1,2 +1,2 @@
 Krachtschaak, the best chess variant out there. Feel free to contribute! No guidelines, no nothing.
-And I do use AI, but I review the code and often edit it. It's just a hobby project for me and my friends, but let's make this a popular variant!
+And I do use AI, but I review the code and often edit it. It's just a hobby project for me and my friends, but let's make this a popular variant! Tell your favorite chess Youtuber, tell your friends, do anything, because this is, in my opinion, one of the best variants ever.
